@@ -1,311 +1,98 @@
-name: 编译内核 a12-5-10-226 - 严格 SUSFS 集成
+name: build-kernel-a12-5-10-226
 
 permissions:
   contents: write
-  actions: write
 
 on:
   workflow_dispatch:
-    inputs:
-      make_release:
-        description: '是否触发 release 步骤 (未启用时仅编译)'
-        required: true
-        type: boolean
-        default: false
-      kernelsu_variant:
-        description: "选择 KernelSU"
-        required: true
-        type: choice
-        options:
-          - Official
-          - Next
-          - MKSU
-          - SukiSU
-        default: SukiSU
-      kernelsu_branch:
-        description: "选择 ksu 分支"
-        required: true
-        type: choice
-        options:
-          - Stable(标准)
-          - Dev(开发)
-          - Other(其他/指定)
-        default: Dev(开发)
-      version:
-        description: '自定义版本名(如5.10.226后面的字符/留空则使用默认版本号)'
-        required: false
-        type: string
-      use_zram:
-        description: '是否开启ZRAM相关补丁'
-        required: true
-        type: boolean
-        default: true
-      use_kpm:
-        description: '是否开启KPM功能?'
-        required: true
-        type: boolean
-        default: true
-      BBG:
-        description: '是否启用 Baseband-guard 支持'
-        required: true
-        type: boolean
-        default: false
 
 jobs:
   build-kernel-5-10-226:
     runs-on: ubuntu-latest
+
     env:
-      SUB_LEVEL: "226"
-      OS_PATCH_LEVEL: "2024-01"
-      CONFIG: "android12-5.10-226"
+      CONFIG: android12-5.10-226
       CCACHE_DIR: ${{ github.workspace }}/.ccache
+      FIXED_TIME: "Fri Jan 24 18:48:47 UTC 2025"
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
-          sudo apt update -y
+          sudo apt update
           sudo apt install -y \
-            ccache python3 git curl wget unzip build-essential perl \
-            clang lld bc flex bison libncurses5-dev libelf-dev libssl-dev dwarves rsync
+            git curl wget unzip build-essential bc flex bison \
+            libncurses5-dev libelf-dev libssl-dev dwarves \
+            clang lld ccache rsync python3
 
-      - name: Configure ccache
+      - name: Setup ccache
         run: |
-          mkdir -p "${CCACHE_DIR}"
-          ccache --max-size=2G || true
-          echo "CCACHE_DIR=${CCACHE_DIR}" >> $GITHUB_ENV
-          export PATH="/usr/lib/ccache:$PATH"
+          mkdir -p "$CCACHE_DIR"
+          ccache --max-size=2G
+          echo "CCACHE_DIR=$CCACHE_DIR" >> $GITHUB_ENV
 
-      - name: Clone helper repositories (minimal)
+      - name: Clone helper repos
         run: |
-          git clone https://github.com/WildPlusKernel/AnyKernel3.git --depth 1 || true
-          git clone https://github.com/ShirkNeko/SukiSU_patch.git --depth 1 || true
-          git clone https://github.com/ITxiao6666/Unicode_bypass_Fix.git --depth 1 || true
+          git clone https://github.com/WildPlusKernel/AnyKernel3.git --depth=1
+          git clone https://github.com/ITxiao6666/Unicode_bypass_Fix.git --depth=1
+          git clone --depth=1 --branch gki-android12-5.10 \
+            https://github.com/ShirkNeko/susfs4ksu.git
 
-      - name: Clone susfs4ksu@gki-android12-5.10 (strict)
+      - name: Init kernel source
         run: |
-          rm -rf susfs4ksu || true
-          # 指定分支 clone，失败即退出（因为我们要求严格使用该分支）
-          git clone --depth 1 --branch gki-android12-5.10 https://github.com/ShirkNeko/susfs4ksu.git susfs4ksu || { echo "Error: failed to clone susfs4ksu@gki-android12-5.10"; exit 1; }
-          echo "Cloned susfs4ksu@gki-android12-5.10"
+          mkdir -p "$CONFIG"
+          cd "$CONFIG"
+          repo init --depth=1 \
+            -u https://android.googlesource.com/kernel/manifest \
+            -b common-android12-5.10
+          repo sync -c -j$(nproc) --no-tags
 
-      - name: Initialize and sync kernel source (common)
+      - name: Apply Unicode patches
         run: |
-          mkdir -p "${CONFIG}"
-          cd "${CONFIG}"
-          if ! command -v repo >/dev/null 2>&1; then
-            curl -sLo ../git-repo-repo https://storage.googleapis.com/git-repo-downloads/repo || true
-            chmod a+rx ../git-repo-repo || true
-            REPO_CMD="../git-repo-repo"
-          else
-            REPO_CMD=repo
-          fi
-          $REPO_CMD init --depth=1 -u https://android.googlesource.com/kernel/manifest -b common-android12-5.10 || true
-          # sync - 允许网络抖动，但 repo 本身失败将继续，这一步应在 runner 网络良好时运行
-          $REPO_CMD --trace sync -c -j$(nproc --all) --no-tags --fail-fast || true
-          cd ..
-
-      - name: Apply Unicode patches (strict, only two specified)
-        run: |
-          set -euo pipefail
-          PATCH_REPO="$GITHUB_WORKSPACE/Unicode_bypass_Fix"
-          TARGET_COMMON="$GITHUB_WORKSPACE/${CONFIG}/common"
-          if [ -d "${PATCH_REPO}" ] && [ -d "${TARGET_COMMON}" ]; then
-            cd "${TARGET_COMMON}"
-            for p in "unicode-bypass_fix_5.10-6.12通用.patch" "unicode_bypass_fix2.patch"; do
-              if [ -f "${PATCH_REPO}/$p" ]; then
-                echo "Checking $p applicability (dry-run)..."
-                if patch -p1 --dry-run < "${PATCH_REPO}/$p" >/dev/null 2>&1; then
-                  echo "Applying patch: $p"
-                  patch -p1 < "${PATCH_REPO}/$p" || { echo "Patch $p failed on apply"; exit 1; }
-                else
-                  echo "Patch $p not applicable to this tree; skipping $p"
-                fi
-              else
-                echo "Patch file missing in repo: ${PATCH_REPO}/$p"
-              fi
-            done
-          else
-            echo "Unicode patch repo or target common dir missing; skipping unicode patch step."
-          fi
-
-      - name: SUSFS integration (strict apply of official patch)
-        run: |
-          set -euo pipefail
-          SUSFS_REPO="$GITHUB_WORKSPACE/susfs4ksu"
-          TARGET_COMMON="$GITHUB_WORKSPACE/${CONFIG}/common"
-          SUSFS_PATCH="$SUSFS_REPO/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
-          if [ ! -d "$SUSFS_REPO" ]; then
-            echo "Error: susfs4ksu repo not found at $SUSFS_REPO"
-            exit 1
-          fi
-          if [ ! -d "$TARGET_COMMON" ]; then
-            echo "Error: target kernel common dir not found at $TARGET_COMMON"
-            exit 1
-          fi
-          if [ ! -f "$SUSFS_PATCH" ]; then
-            echo "Error: SUSFS patch file missing: $SUSFS_PATCH"
-            exit 1
-          fi
-          cd "$TARGET_COMMON"
-          echo "Performing dry-run for SUSFS patch..."
-          if patch -p1 --dry-run < "$SUSFS_PATCH" >/dev/null 2>&1; then
-            echo "Dry-run OK — applying SUSFS patch now."
-            patch -p1 < "$SUSFS_PATCH" || { echo "Error: SUSFS patch apply failed"; exit 1; }
-            echo "SUSFS patch applied successfully."
-          else
-            echo "ERROR: SUSFS patch cannot be applied cleanly to this kernel tree."
-            echo "This workflow requires susfs4ksu@gki-android12-5.10 to apply cleanly."
-            echo "Aborting to avoid an inconsistent build."
-            exit 1
-          fi
-          # Verify presence of build integration (Kconfig/Makefile effects)
-          if [ -d "./fs/susfs" ] || grep -Rq "susfs" include 2>/dev/null; then
-            echo "SUSFS appears present in tree."
-          else
-            echo "ERROR: SUSFS files or headers not found after patch. Aborting."
-            exit 1
-          fi
-          # Ensure defconfig enables SUSFS
-          DEFCONFIG="$TARGET_COMMON/arch/arm64/configs/gki_defconfig"
-          if [ -f "$DEFCONFIG" ]; then
-            grep -q "^CONFIG_KSU_SUSFS=y" "$DEFCONFIG" || echo "CONFIG_KSU_SUSFS=y" >> "$DEFCONFIG"
-            echo "Ensured CONFIG_KSU_SUSFS=y in defconfig"
-          else
-            echo "Warning: defconfig not found at $DEFCONFIG; ensure CONFIG_KSU_SUSFS is enabled manually."
-          fi
-
-      - name: Configure KernelSU branch selection
-        run: |
-          branch_input="${{ inputs.kernelsu_branch }}"
-          variant_input="${{ inputs.kernelsu_variant }}"
-          BRANCH_ARG=""
-          case "$branch_input" in
-            "Stable(标准)")
-              BRANCH_ARG="-s builtin"
-              ;;
-            "Dev(开发)")
-              if [ "$variant_input" = "Official" ] || [ "$variant_input" = "MKSU" ]; then
-                BRANCH_ARG="-s main"
-              elif [ "$variant_input" = "Next" ]; then
-                BRANCH_ARG="-s next-susfs-dev"
-              else
-                BRANCH_ARG="-s builtin"
-              fi
-              ;;
-            *)
-              BRANCH_ARG="-s main"
-              ;;
-          esac
-          echo "BRANCH_ARG=${BRANCH_ARG}" >> $GITHUB_ENV
-
-      - name: Install KernelSU (best-effort)
-        run: |
-          set -euo pipefail
-          cd "${CONFIG}" || true
-          if [ "${{ inputs.kernelsu_variant }}" = "Official" ]; then
-            curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash $BRANCH_ARG || true
-          elif [ "${{ inputs.kernelsu_variant }}" = "Next" ]; then
-            curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next-susfs/kernel/setup.sh" | bash $BRANCH_ARG || true
-          elif [ "${{ inputs.kernelsu_variant }}" = "MKSU" ]; then
-            curl -LSs "https://raw.githubusercontent.com/5ec1cff/KernelSU/main/kernel/setup.sh" | bash $BRANCH_ARG || true
-          elif [ "${{ inputs.kernelsu_variant }}" = "SukiSU" ]; then
-            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash $BRANCH_ARG || true
-          fi
-
-      - name: Optional: add Baseband-guard (BBG)
-        if: ${{ inputs.BBG == 'true' || inputs.BBG == true }}
-        run: |
-          COMMON_DIR="$GITHUB_WORKSPACE/${CONFIG}/common"
-          if [ -d "$COMMON_DIR" ]; then
-            cd "$COMMON_DIR"
-            wget -qO- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash || true
-            CFG_FILE="arch/arm64/configs/gki_defconfig"
-            if [ -f "$CFG_FILE" ]; then
-              grep -q "^CONFIG_BBG" "$CFG_FILE" || echo "CONFIG_BBG=y" >> "$CFG_FILE"
-            fi
-          else
-            echo "common dir not present; skipping BBG"
-          fi
-
-      - name: Fix compile time & apply version if provided
-        run: |
-          set -euo pipefail
-          COMMON_DIR="$GITHUB_WORKSPACE/${CONFIG}/common"
-          if [ -d "$COMMON_DIR" ]; then
-            cd "$COMMON_DIR"
-            CURRENT_TIME="Fri Jan 24 18:48:47 UTC 2025"
-            if [ -f "./scripts/mkcompile_h" ]; then
-              # 安全替换：仅在能找到 UTS_VERSION 栏位时替换
-              if grep -q "UTS_VERSION" ./scripts/mkcompile_h; then
-                perl -0777 -pe 's/UTS_VERSION=.*?\\n/UTS_VERSION="#1 SMP PREEMPT '"${CURRENT_TIME}"'\\n/s' -i ./scripts/mkcompile_h || true
-                echo "Rewrote UTS_VERSION in scripts/mkcompile_h to fixed build time."
-              else
-                echo "mkcompile_h exists but no UTS_VERSION found; skipping automatic replace."
-              fi
-            else
-              echo "scripts/mkcompile_h not found; cannot set compile time automatically."
-            fi
-            if [ -n "${{ inputs.version }}" ]; then
-              CFG="arch/arm64/configs/gki_defconfig"
-              if [ -f "$CFG" ]; then
-                sed -i "/^CONFIG_LOCALVERSION=/c\CONFIG_LOCALVERSION=\"${{ inputs.version }}\"" "$CFG" || true
-                echo "Applied custom CONFIG_LOCALVERSION=${{ inputs.version }}"
+          cd "$CONFIG/common"
+          for p in \
+            unicode-bypass_fix_5.10-6.12通用.patch \
+            unicode_bypass_fix2.patch; do
+            if [ -f "$GITHUB_WORKSPACE/Unicode_bypass_Fix/$p" ]; then
+              if patch -p1 --dry-run < "$GITHUB_WORKSPACE/Unicode_bypass_Fix/$p"; then
+                patch -p1 < "$GITHUB_WORKSPACE/Unicode_bypass_Fix/$p"
               fi
             fi
-          else
-            echo "common dir missing; skipping compile time/version modifications."
-          fi
+          done
 
-      - name: Build kernel (with single retry)
+      - name: Apply SUSFS (official strict patch)
         run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/${CONFIG}" || exit 1
-          if [ -f "build/build.sh" ]; then
-            if ! LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CC="ccache clang"; then
-              echo "First build attempt failed; printing tail of log and retrying once..."
-              tail -n 200 out/android12-5.10/common/build.log || true
-              LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CC="ccache clang" || { echo "Build failed after retry"; exit 1; }
-            fi
-          else
-            echo "Warning: build/build.sh not found; aborting build."
-            exit 1
-          fi
-          ccache --show-stats || true
+          cd "$CONFIG/common"
+          PATCH="$GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
+          patch -p1 --dry-run < "$PATCH"
+          patch -p1 < "$PATCH"
 
-      - name: Collect artifacts and package AnyKernel3
+          grep -q CONFIG_KSU_SUSFS arch/arm64/configs/gki_defconfig || \
+            echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/gki_defconfig
+
+      - name: Fix build time
         run: |
-          set -euo pipefail
-          OUT_DIR="$GITHUB_WORKSPACE/${CONFIG}/out"
-          if [ -d "${OUT_DIR}" ]; then
-            mkdir -p "$GITHUB_WORKSPACE/bootimgs" || true
-            [ -f "${OUT_DIR}/android12-5.10/dist/Image" ] && cp "${OUT_DIR}/android12-5.10/dist/Image" "$GITHUB_WORKSPACE" || true
-            [ -f "${OUT_DIR}/android12-5.10/dist/Image.lz4" ] && cp "${OUT_DIR}/android12-5.10/dist/Image.lz4" "$GITHUB_WORKSPACE" || true
-          fi
-          if [ -d "$GITHUB_WORKSPACE/AnyKernel3" ]; then
-            cd "$GITHUB_WORKSPACE/AnyKernel3"
-            ZIP_NAME="android12-5.10.${{ env.SUB_LEVEL }}-AnyKernel3.zip"
-            if [ -f "$GITHUB_WORKSPACE/Image" ]; then
-              cp "$GITHUB_WORKSPACE/Image" ./Image
-              zip -r "$GITHUB_WORKSPACE/$ZIP_NAME" ./* || true
-              rm -f ./Image || true
-            fi
-            if [ -f "$GITHUB_WORKSPACE/Image.lz4" ]; then
-              cp "$GITHUB_WORKSPACE/Image.lz4" ./Image.lz4
-              zip -r "$GITHUB_WORKSPACE/android12-5.10.${{ env.SUB_LEVEL }}-AnyKernel3-lz4.zip" ./* || true
-              rm -f ./Image.lz4 || true
-            fi
+          cd "$CONFIG/common"
+          if [ -f scripts/mkcompile_h ]; then
+            sed -i "s|UTS_VERSION=.*|UTS_VERSION=\"#1 SMP PREEMPT $FIXED_TIME\"|" scripts/mkcompile_h || true
           fi
 
-      - name: Upload build artifacts
+      - name: Build kernel
+        run: |
+          cd "$CONFIG"
+          LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 \
+            build/build.sh CC="ccache clang"
+
+      - name: Package AnyKernel3
+        run: |
+          cp "$CONFIG/out/android12-5.10/dist/Image" AnyKernel3/Image
+          cd AnyKernel3
+          zip -r "$GITHUB_WORKSPACE/kernel-5.10.226.zip" .
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-artifacts-5.10.226
-          path: |
-            android12-5.10.*AnyKernel3*.zip
-            $GITHUB_WORKSPACE/Image*
-            $GITHUB_WORKSPACE/bootimgs/*.img
+          name: kernel-5.10.226
+          path: kernel-5.10.226.zip
