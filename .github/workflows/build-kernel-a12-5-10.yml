@@ -52,7 +52,7 @@ on:
         default: false
 
 jobs:
-  build-kernel-5.10.226:
+  build-kernel-5-10-226:
     runs-on: ubuntu-latest
     env:
       SUB_LEVEL: "226"
