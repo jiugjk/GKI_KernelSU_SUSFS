@@ -386,10 +386,17 @@ jobs:
           # 替换 mkcompile_h 中的时间
           perl -pi -e "s{UTS_VERSION=\"\\\$\(echo \\\$UTS_VERSION \\\$CONFIG_FLAGS \\\$TIMESTAMP \\| cut -b -\\\$UTS_LEN\)\"}{UTS_VERSION=\"#1 SMP PREEMPT $CURRENT_TIME\"}" ./common/scripts/mkcompile_h
 
-          # Bazel 构建设置清理
-          sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' ./common/BUILD.bazel
-          rm -rf ./common/android/abi_gki_protected_exports_*
-          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+          # Bazel 构建设置清理 (已修复：自动检测文件是否存在)
+          if [ -f ./common/BUILD.bazel ]; then
+            sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' ./common/BUILD.bazel
+          fi
+
+          rm -rf ./common/android/abi_gki_protected_exports_* || true
+
+          if [ -f ./build/kernel/kleaf/impl/stamp.bzl ]; then
+            sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+          fi
+
           if [ ! -z ${{ inputs.version }} ]; then
             sed -i '/^CONFIG_LOCALVERSION=/ s/="\([^"]*\)"/="${{ inputs.version }}"/' ./common/arch/arm64/configs/gki_defconfig
           fi
