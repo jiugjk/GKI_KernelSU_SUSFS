@@ -247,7 +247,7 @@ jobs:
             patch -p1 < fix.patch || true
           fi
 
-          cd ../common
+           cd "$GITHUB_WORKSPACE/$CONFIG/common"
           patch -p1 --fuzz=3 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
 
       - name: 修复特定分支的编译问题 (MMU)
